@@ -127,6 +127,61 @@ Track recurring checks in `memory/heartbeat-state.json` when needed.
 
 注意：如涉及潜在破坏性命令，遵守本文件 Red Lines。
 
+## Sub-Agent Orchestration Rules
+
+### Model Selection Strategy
+
+Choose models based on task complexity to balance cost and quality:
+
+| Level | Use Cases | Model | Thinking |
+|------|------|------|------|
+| Simple | Weather, calendar, status checks, single data fetches | minimax/MiniMax-M2.7 | off |
+| Medium | Search summaries, document summaries, drafting, multi-step information synthesis | openai-codex/gpt-5.2 | low |
+| Complex | Code review, architecture analysis, security audit, multi-factor decision comparison | openai-codex/gpt-5.4 | high |
+
+Principles:
+- Default to the cheapest model that can do the job
+- Upgrade only when the task clearly needs stronger reasoning
+- When unsure, choose the medium tier
+- Never assign the main agent's premium model to sub-agents
+
+### Common Workflows
+
+**Daily Briefing** — when the user says "daily briefing" or during morning heartbeat:
+1. Spawn up to 4 sub-agents in parallel (simple tier)
+2. Suggested tasks:
+   - Weather: Shanghai next 24 hours
+   - Calendar: today's meetings and todos
+   - Email: unread urgent email summary
+   - News: latest AI / agent updates (max 5 items)
+3. Merge results into one structured briefing
+4. Send via the current channel
+
+**Technical Research** — when the user asks to research multiple topics:
+1. Spawn one sub-agent per topic (medium tier)
+2. Each sub-agent reviews 3–5 recent sources and returns a summary within 300 Chinese characters
+3. Merge results into one comparison summary
+
+**Code Review** — when the user says "review" or asks for code review:
+1. Spawn one sub-agent (complex tier), timeout 5 minutes
+2. Review for: security issues, type safety, error handling, architectural soundness
+3. Return: issue list + severity + suggested fixes
+
+**Batch Document Processing** — when the user needs multiple documents processed:
+1. Spawn one sub-agent per document (choose tier by document complexity)
+2. Extract key information and return structured JSON
+3. Merge and compare results after all runs finish
+
+### Global Constraints
+
+- No more than 5 parallel sub-agents unless the user explicitly asks for a wider fan-out
+- Every sub-agent task prompt must be self-contained with the required context
+- Default timeouts:
+  - Simple: 60 seconds
+  - Medium: 180 seconds
+  - Complex: 600 seconds
+- Default cleanup is `delete` unless the user asks to keep logs or the session needs to persist
+
 ## Make It Yours
 
 This is a starting point. Keep sharpening it.
