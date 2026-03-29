@@ -1,0 +1,55 @@
+{
+  "updatedAt": "2026-03-29T23:35:00+08:00",
+  "account": {
+    "availableCash": 4111.20,
+    "currency": "CNY",
+    "pushTarget": "ou_382230f22d96a35fbad447656bfc6b9c",
+    "channel": "feishu"
+  },
+  "positions": [
+    {
+      "symbol": "603341",
+      "name": "龙旗科技",
+      "shares": 100,
+      "cost": 45.551,
+      "hardStop": 41.00,
+      "type": "stock",
+      "status": "watch"
+    },
+    {
+      "symbol": "002969",
+      "name": "嘉美包装",
+      "shares": 300,
+      "cost": 25.515,
+      "hardStop": 22.96,
+      "type": "stock",
+      "status": "event-driven",
+      "notes": ["曾出现要约收购利好"]
+    },
+    {
+      "symbol": "603316",
+      "name": "诚邦股份",
+      "shares": 100,
+      "cost": 16.030,
+      "hardStop": 14.43,
+      "type": "stock",
+      "status": "watch"
+    },
+    {
+      "symbol": "560390",
+      "name": "电网设备ETF",
+      "shares": 4100,
+      "cost": 1.047,
+      "hardStop": 0.94,
+      "type": "etf",
+      "status": "core-watch"
+    }
+  ],
+  "rules": {
+    "mustHavePlanBeforeBuy": true,
+    "mustHaveStopBeforeBuy": true,
+    "prioritizePositions": true,
+    "avoidUnverifiedRumors": true,
+    "preferDefenseInWeakTape": true
+  }
+}
