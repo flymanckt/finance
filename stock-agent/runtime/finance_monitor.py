@@ -129,22 +129,55 @@ def mark_sent(state, key):
     state.setdefault('lastSent', {})[key] = datetime.now().isoformat()
 
 
+def score_watch_item(item, quote):
+    score = 0
+    reasons = []
+    pct = quote.get('changePct')
+    stop = item.get('stop')
+    price = quote.get('price')
+    priority = item.get('priority', 'C')
+    style = item.get('style', '')
+
+    if priority == 'A':
+        score += 2
+        reasons.append('A级观察')
+    elif priority == 'B':
+        score += 1
+        reasons.append('B级观察')
+
+    if style == '事件驱动':
+        score += 2
+        reasons.append('事件驱动')
+
+    if pct is not None and pct >= 5:
+        score += 3
+        reasons.append('涨幅强')
+    elif pct is not None and pct >= 2:
+        score += 2
+        reasons.append('走势偏强')
+    elif pct is not None and pct <= -3:
+        score -= 1
+        reasons.append('走势偏弱')
+
+    if stop is not None and price is not None and price <= stop:
+        score -= 3
+        reasons.append('接近止损')
+
+    return max(score, 0), reasons
+
+
 def build_position_alerts(positions, last_snapshot, config):
     alerts = []
     current_snapshot = {}
+    detailed = []
     for p in positions:
         quote = get_quote(p['symbol'])
-        time.sleep(0.3)
+        time.sleep(0.25)
         current_snapshot[p['symbol']] = quote
+        detail = {'symbol': p['symbol'], 'name': p['name'], 'quote': quote, 'cost': p.get('cost'), 'hardStop': p.get('hardStop')}
+        detailed.append(detail)
         if quote.get('error'):
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '中',
-                'action': '观察',
-                'summary': f"{p['name']} 行情获取失败：{quote['error']}"
-            })
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '中', 'action': '观察', 'summary': f"{p['name']} 行情获取失败：{quote['error']}"})
             continue
 
         price = quote.get('price')
@@ -153,78 +186,42 @@ def build_position_alerts(positions, last_snapshot, config):
         last_price = (last_snapshot.get(p['symbol']) or {}).get('price')
 
         if price is not None and stop is not None and price <= stop:
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '高',
-                'action': '减仓/止损',
-                'summary': f"{p['name']} 现价 {price} 已接近或跌破硬止损 {stop}，优先防守。"
-            })
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '高', 'action': '减仓/止损', 'summary': f"{p['name']} 现价 {price} 已接近或跌破硬止损 {stop}，优先防守。"})
         elif pct is not None and pct <= config.get('dropAlertPct', -5):
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '中',
-                'action': '重点观察',
-                'summary': f"{p['name']} 当日跌幅 {pct}% ，需警惕弱势延续。"
-            })
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '中', 'action': '重点观察', 'summary': f"{p['name']} 当日跌幅 {pct}% ，需警惕弱势延续。"})
         elif pct is not None and pct >= config.get('surgeAlertPct', 5):
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '中',
-                'action': '观察/分批止盈',
-                'summary': f"{p['name']} 当日涨幅 {pct}% ，若冲高回落需防兑现。"
-            })
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '中', 'action': '观察/分批止盈', 'summary': f"{p['name']} 当日涨幅 {pct}% ，若冲高回落需防兑现。"})
         elif last_price and price and abs(price - last_price) / last_price * 100 >= config.get('priceMoveThresholdPct', 3):
             direction = '上行' if price > last_price else '下行'
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '低',
-                'action': '观察',
-                'summary': f"{p['name']} 较上次快照明显{direction}，现价 {price}。"
-            })
-    return alerts[:config.get('positionMaxAlerts', 6)], current_snapshot
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '低', 'action': '观察', 'summary': f"{p['name']} 较上次快照明显{direction}，现价 {price}。"})
+    return alerts[:config.get('positionMaxAlerts', 6)], current_snapshot, detailed
 
 
 def build_watchlist_alerts(items, config):
     alerts = []
+    detailed = []
     for item in items:
         quote = get_quote(item['symbol'])
-        time.sleep(0.3)
+        time.sleep(0.25)
         if quote.get('error'):
             continue
+        score, reasons = score_watch_item(item, quote)
+        detailed.append({'item': item, 'quote': quote, 'score': score, 'reasons': reasons})
         price = quote.get('price')
         pct = quote.get('changePct')
         stop = item.get('stop')
-        priority = item.get('priority', 'C')
-        if priority == 'A' and pct is not None and pct >= 5:
-            alerts.append({
-                'kind': 'watchlist',
-                'symbol': item['symbol'],
-                'name': item['name'],
-                'level': '中',
-                'action': '重点观察',
-                'summary': f"观察池 {item['name']} 涨幅 {pct}% ，事件驱动逻辑正在强化，留意是否放量承接。"
-            })
+        if score >= 7:
+            alerts.append({'kind': 'watchlist', 'symbol': item['symbol'], 'name': item['name'], 'level': '中', 'action': '重点观察', 'summary': f"观察池 {item['name']} 评分 {score}/10，{','.join(reasons)}，留意触发条件是否成立。"})
         elif stop is not None and price is not None and price <= stop:
-            alerts.append({
-                'kind': 'watchlist',
-                'symbol': item['symbol'],
-                'name': item['name'],
-                'level': '中',
-                'action': '移出观察/谨慎',
-                'summary': f"观察池 {item['name']} 现价 {price} 接近/跌破观察止损 {stop}，逻辑需重审。"
-            })
-    return alerts[:config.get('watchlistMaxAlerts', 3)]
+            alerts.append({'kind': 'watchlist', 'symbol': item['symbol'], 'name': item['name'], 'level': '中', 'action': '移出观察/谨慎', 'summary': f"观察池 {item['name']} 现价 {price} 接近/跌破观察止损 {stop}，逻辑需重审。"})
+        elif pct is not None and pct >= 5:
+            alerts.append({'kind': 'watchlist', 'symbol': item['symbol'], 'name': item['name'], 'level': '低', 'action': '继续观察', 'summary': f"观察池 {item['name']} 涨幅 {pct}% ，强度提升，但尚未达到重点推荐阈值。"})
+    return alerts[:config.get('watchlistMaxAlerts', 3)], detailed
 
 
-def dedup_alerts(alerts, state, config):
+def dedup_alerts(alerts, state, config, mode):
+    if mode == '收盘':
+        return alerts
     kept = []
     dedup_minutes = config.get('dedupMinutes', state.get('dedupMinutes', 120))
     for a in alerts:
@@ -235,7 +232,46 @@ def dedup_alerts(alerts, state, config):
     return kept
 
 
-def format_message(mode, indices, bias, alerts, positions):
+def format_position_review(details):
+    lines = []
+    for d in details:
+        quote = d['quote']
+        if quote.get('error'):
+            lines.append(f"- {d['name']}({d['symbol']})：行情失败，待复核")
+            continue
+        price = quote.get('price')
+        pct = quote.get('changePct')
+        stop = d.get('hardStop')
+        cost = d.get('cost')
+        if price is not None and stop is not None and price <= stop:
+            action = '防守/减仓'
+        elif pct is not None and pct >= 5:
+            action = '强势观察，防冲高回落'
+        elif pct is not None and pct <= -5:
+            action = '弱势防守'
+        else:
+            action = '继续跟踪'
+        pnl = None
+        if price is not None and cost:
+            pnl = round((price - cost) / cost * 100, 2)
+        pnl_text = f"，相对成本 {pnl}%" if pnl is not None else ''
+        lines.append(f"- {d['name']}({d['symbol']})：现价 {price}，当日 {pct}%{pnl_text}，建议：{action}")
+    return lines
+
+
+def format_watchlist_review(details):
+    if not details:
+        return ['- 暂无观察池数据']
+    details = sorted(details, key=lambda x: x['score'], reverse=True)
+    lines = []
+    for d in details[:5]:
+        item = d['item']
+        quote = d['quote']
+        lines.append(f"- {item['name']}({item['symbol']})：评分 {d['score']}/10，涨跌 {quote.get('changePct')}%，理由：{','.join(d['reasons']) or '暂无'}")
+    return lines
+
+
+def format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details):
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
     lines = [f"【Finance {mode}】{now}", f"市场环境：{bias}"]
     if indices:
@@ -247,8 +283,16 @@ def format_message(mode, indices, bias, alerts, positions):
         for p in positions:
             lines.append(f"- {p['name']}({p['symbol']})：硬止损 {p.get('hardStop')}，优先按纪律处理")
 
-    if mode == '收盘':
-        lines.append('收盘要求：先看风控执行，再看明日预案。')
+    elif mode == '午间':
+        lines.append('午间判断：看上午强弱是否延续，优先修正风险判断。')
+
+    elif mode == '收盘':
+        lines.append('持仓复盘：')
+        lines.extend(format_position_review(position_details))
+        lines.append('观察池复盘：')
+        lines.extend(format_watchlist_review(watchlist_details))
+        lines.append('明日原则：先看风险，再决定是否进攻。')
+        return '\n'.join(lines)
 
     if alerts:
         lines.append('重点变化：')
@@ -262,12 +306,20 @@ def format_message(mode, indices, bias, alerts, positions):
     return '\n'.join(lines)
 
 
-def append_ledger(mode, alerts, bias):
+def append_ledger(mode, alerts, bias, position_details, watchlist_details):
     LEDGER_MD.parent.mkdir(parents=True, exist_ok=True)
     if not LEDGER_MD.exists():
         LEDGER_MD.write_text('# 实时复盘台账\n\n', encoding='utf-8')
     with LEDGER_MD.open('a', encoding='utf-8') as f:
         f.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} {mode} | 市场环境：{bias}\n")
+        if mode == '收盘':
+            f.write('### 持仓复盘\n')
+            for line in format_position_review(position_details):
+                f.write(f"{line}\n")
+            f.write('### 观察池复盘\n')
+            for line in format_watchlist_review(watchlist_details):
+                f.write(f"{line}\n")
+            return
         if not alerts:
             f.write('- 无显著增量信号，维持原计划。\n')
             return
@@ -287,11 +339,11 @@ def main():
     last_snapshot = load_json(CACHE_JSON, {})
     indices = get_indices()
     bias = market_bias(indices)
-    position_alerts, current_snapshot = build_position_alerts(positions, last_snapshot, config)
-    watchlist_alerts = build_watchlist_alerts(watch_items, config)
-    alerts = dedup_alerts(position_alerts + watchlist_alerts, state, config)
-    msg = format_message(mode, indices, bias, alerts, positions)
-    append_ledger(mode, alerts, bias)
+    position_alerts, current_snapshot, position_details = build_position_alerts(positions, last_snapshot, config)
+    watchlist_alerts, watchlist_details = build_watchlist_alerts(watch_items, config)
+    alerts = dedup_alerts(position_alerts + watchlist_alerts, state, config, mode)
+    msg = format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details)
+    append_ledger(mode, alerts, bias, position_details, watchlist_details)
     save_json(CACHE_JSON, current_snapshot)
     save_json(ALERT_STATE_JSON, state)
     print(msg)
