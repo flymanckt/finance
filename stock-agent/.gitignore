@@ -1,0 +1,7 @@
+# runtime state
+runtime/last_snapshot.json
+runtime/alert_state.json
+review-ledger-live.md
+
+# local notes
+memory/*.tmp
