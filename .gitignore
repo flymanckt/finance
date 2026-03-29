@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Logs
+*.log
+LOG_FILE
+
+# Temp
+.tmp/
+.tmp
+/tmp/
+tmp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated local state
+study-agent/study_state.json
+study-agent/study_report.md
+study-agent/study_plan.md
+study-agent/.env
+study-agent/watch_log.txt
+study-agent/progress_log.json
+
+# OpenClaw local runtime state
+.openclaw/workspace-state.json
+study-agent/.openclaw/workspace-state.json
+stock-agent/.openclaw/workspace-state.json
+
+# Archives
+*.tar.gz
