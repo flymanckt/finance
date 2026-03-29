@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import json
 import urllib.request
-import urllib.error
 import socket
 import time
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path('/home/kent/.openclaw/workspace/stock-agent')
@@ -12,6 +12,8 @@ POSITIONS_JSON = ROOT / 'positions.json'
 WATCHLIST_JSON = ROOT / 'watchlist.json'
 LEDGER_MD = ROOT / 'review-ledger-live.md'
 CACHE_JSON = ROOT / 'runtime' / 'last_snapshot.json'
+ALERT_STATE_JSON = ROOT / 'runtime' / 'alert_state.json'
+RUNTIME_CONFIG_JSON = ROOT / 'runtime' / 'runtime_config.json'
 
 socket.setdefaulttimeout(15)
 
@@ -91,8 +93,6 @@ def get_indices():
 
 
 def market_bias(indices):
-    if not indices:
-        return '未知'
     vals = [x['changePct'] for x in indices if isinstance(x.get('changePct'), (int, float))]
     if not vals:
         return '未知'
@@ -108,7 +108,28 @@ def market_bias(indices):
     return '偏空'
 
 
-def build_position_alerts(positions, last_snapshot):
+def alert_key(kind, symbol, action, summary):
+    raw = f"{kind}|{symbol}|{action}|{summary}"
+    return hashlib.md5(raw.encode('utf-8')).hexdigest()
+
+
+def should_send_alert(state, key, dedup_minutes):
+    now = datetime.now()
+    last = state.get('lastSent', {}).get(key)
+    if not last:
+        return True
+    try:
+        ts = datetime.fromisoformat(last)
+    except Exception:
+        return True
+    return now - ts >= timedelta(minutes=dedup_minutes)
+
+
+def mark_sent(state, key):
+    state.setdefault('lastSent', {})[key] = datetime.now().isoformat()
+
+
+def build_position_alerts(positions, last_snapshot, config):
     alerts = []
     current_snapshot = {}
     for p in positions:
@@ -117,6 +138,7 @@ def build_position_alerts(positions, last_snapshot):
         current_snapshot[p['symbol']] = quote
         if quote.get('error'):
             alerts.append({
+                'kind': 'position',
                 'symbol': p['symbol'],
                 'name': p['name'],
                 'level': '中',
@@ -132,38 +154,85 @@ def build_position_alerts(positions, last_snapshot):
 
         if price is not None and stop is not None and price <= stop:
             alerts.append({
+                'kind': 'position',
                 'symbol': p['symbol'],
                 'name': p['name'],
                 'level': '高',
                 'action': '减仓/止损',
                 'summary': f"{p['name']} 现价 {price} 已接近或跌破硬止损 {stop}，优先防守。"
             })
-        elif pct is not None and pct <= -5:
+        elif pct is not None and pct <= config.get('dropAlertPct', -5):
             alerts.append({
+                'kind': 'position',
                 'symbol': p['symbol'],
                 'name': p['name'],
                 'level': '中',
                 'action': '重点观察',
                 'summary': f"{p['name']} 当日跌幅 {pct}% ，需警惕弱势延续。"
             })
-        elif pct is not None and pct >= 5:
+        elif pct is not None and pct >= config.get('surgeAlertPct', 5):
             alerts.append({
+                'kind': 'position',
                 'symbol': p['symbol'],
                 'name': p['name'],
                 'level': '中',
                 'action': '观察/分批止盈',
                 'summary': f"{p['name']} 当日涨幅 {pct}% ，若冲高回落需防兑现。"
             })
-        elif last_price and price and abs(price - last_price) / last_price >= 0.03:
+        elif last_price and price and abs(price - last_price) / last_price * 100 >= config.get('priceMoveThresholdPct', 3):
             direction = '上行' if price > last_price else '下行'
             alerts.append({
+                'kind': 'position',
                 'symbol': p['symbol'],
                 'name': p['name'],
                 'level': '低',
                 'action': '观察',
                 'summary': f"{p['name']} 较上次快照明显{direction}，现价 {price}。"
             })
-    return alerts, current_snapshot
+    return alerts[:config.get('positionMaxAlerts', 6)], current_snapshot
+
+
+def build_watchlist_alerts(items, config):
+    alerts = []
+    for item in items:
+        quote = get_quote(item['symbol'])
+        time.sleep(0.3)
+        if quote.get('error'):
+            continue
+        price = quote.get('price')
+        pct = quote.get('changePct')
+        stop = item.get('stop')
+        priority = item.get('priority', 'C')
+        if priority == 'A' and pct is not None and pct >= 5:
+            alerts.append({
+                'kind': 'watchlist',
+                'symbol': item['symbol'],
+                'name': item['name'],
+                'level': '中',
+                'action': '重点观察',
+                'summary': f"观察池 {item['name']} 涨幅 {pct}% ，事件驱动逻辑正在强化，留意是否放量承接。"
+            })
+        elif stop is not None and price is not None and price <= stop:
+            alerts.append({
+                'kind': 'watchlist',
+                'symbol': item['symbol'],
+                'name': item['name'],
+                'level': '中',
+                'action': '移出观察/谨慎',
+                'summary': f"观察池 {item['name']} 现价 {price} 接近/跌破观察止损 {stop}，逻辑需重审。"
+            })
+    return alerts[:config.get('watchlistMaxAlerts', 3)]
+
+
+def dedup_alerts(alerts, state, config):
+    kept = []
+    dedup_minutes = config.get('dedupMinutes', state.get('dedupMinutes', 120))
+    for a in alerts:
+        key = alert_key(a['kind'], a['symbol'], a['action'], a['summary'])
+        if should_send_alert(state, key, dedup_minutes):
+            kept.append(a)
+            mark_sent(state, key)
+    return kept
 
 
 def format_message(mode, indices, bias, alerts, positions):
@@ -178,10 +247,14 @@ def format_message(mode, indices, bias, alerts, positions):
         for p in positions:
             lines.append(f"- {p['name']}({p['symbol']})：硬止损 {p.get('hardStop')}，优先按纪律处理")
 
+    if mode == '收盘':
+        lines.append('收盘要求：先看风控执行，再看明日预案。')
+
     if alerts:
         lines.append('重点变化：')
-        for a in alerts[:6]:
-            lines.append(f"- {a['name']}：{a['summary']} | 建议：{a['action']} | 风险：{a['level']}")
+        for a in alerts:
+            prefix = '持仓' if a['kind'] == 'position' else '观察池'
+            lines.append(f"- [{prefix}] {a['name']}：{a['summary']} | 建议：{a['action']} | 风险：{a['level']}")
     else:
         lines.append('重点变化：暂无显著增量信号，维持原计划。')
 
@@ -189,30 +262,38 @@ def format_message(mode, indices, bias, alerts, positions):
     return '\n'.join(lines)
 
 
-def append_ledger(mode, alerts):
-    if not alerts:
-        return
+def append_ledger(mode, alerts, bias):
     LEDGER_MD.parent.mkdir(parents=True, exist_ok=True)
     if not LEDGER_MD.exists():
         LEDGER_MD.write_text('# 实时复盘台账\n\n', encoding='utf-8')
     with LEDGER_MD.open('a', encoding='utf-8') as f:
-        f.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} {mode}\n")
+        f.write(f"\n## {datetime.now().strftime('%Y-%m-%d %H:%M')} {mode} | 市场环境：{bias}\n")
+        if not alerts:
+            f.write('- 无显著增量信号，维持原计划。\n')
+            return
         for a in alerts:
-            f.write(f"- {a['symbol']} {a['name']} | 建议：{a['action']} | 风险：{a['level']} | {a['summary']}\n")
+            f.write(f"- [{a['kind']}] {a['symbol']} {a['name']} | 建议：{a['action']} | 风险：{a['level']} | {a['summary']}\n")
 
 
 def main():
     import sys
     mode = sys.argv[1] if len(sys.argv) > 1 else '巡检'
+    config = load_json(RUNTIME_CONFIG_JSON, {})
+    state = load_json(ALERT_STATE_JSON, {'lastSent': {}, 'dedupMinutes': 120, 'version': 1})
     positions_data = load_json(POSITIONS_JSON, {'positions': []})
+    watchlist_data = load_json(WATCHLIST_JSON, {'items': []})
     positions = positions_data.get('positions', [])
+    watch_items = watchlist_data.get('items', [])
     last_snapshot = load_json(CACHE_JSON, {})
     indices = get_indices()
     bias = market_bias(indices)
-    alerts, current_snapshot = build_position_alerts(positions, last_snapshot)
+    position_alerts, current_snapshot = build_position_alerts(positions, last_snapshot, config)
+    watchlist_alerts = build_watchlist_alerts(watch_items, config)
+    alerts = dedup_alerts(position_alerts + watchlist_alerts, state, config)
     msg = format_message(mode, indices, bias, alerts, positions)
-    append_ledger(mode, alerts)
+    append_ledger(mode, alerts, bias)
     save_json(CACHE_JSON, current_snapshot)
+    save_json(ALERT_STATE_JSON, state)
     print(msg)
 
 

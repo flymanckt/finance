@@ -1,0 +1,9 @@
+{
+  "watchlistMaxAlerts": 3,
+  "positionMaxAlerts": 6,
+  "dedupMinutes": 120,
+  "priceMoveThresholdPct": 3,
+  "dropAlertPct": -5,
+  "surgeAlertPct": 5,
+  "closeReviewIncludeAllPositions": true
+}
