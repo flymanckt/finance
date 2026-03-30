@@ -22,5 +22,5 @@
     "盘前",
     "收盘"
   ],
-  "llmOnHighRiskOnly": true
+  "llmOnHighRiskOnly": false
 }

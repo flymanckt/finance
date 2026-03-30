@@ -16,6 +16,7 @@ LEDGER_MD = ROOT / 'review-ledger-live.md'
 CACHE_JSON = ROOT / 'runtime' / 'last_snapshot.json'
 ALERT_STATE_JSON = ROOT / 'runtime' / 'alert_state.json'
 RUNTIME_CONFIG_JSON = ROOT / 'runtime' / 'runtime_config.json'
+AKSHARE_CACHE_JSON = ROOT / 'runtime' / 'akshare_spot_cache.json'
 
 socket.setdefaulttimeout(15)
 AKSHARE_SPOT_CACHE = None
@@ -187,7 +188,13 @@ def get_quote_eastmoney(code):
 def load_akshare_spot_table():
     global AKSHARE_SPOT_CACHE, AKSHARE_SPOT_CACHE_TS
     now = time.time()
-    if AKSHARE_SPOT_CACHE is not None and AKSHARE_SPOT_CACHE_TS and now - AKSHARE_SPOT_CACHE_TS < 60:
+    cache_ttl = 180
+    if AKSHARE_SPOT_CACHE is not None and AKSHARE_SPOT_CACHE_TS and now - AKSHARE_SPOT_CACHE_TS < cache_ttl:
+        return AKSHARE_SPOT_CACHE
+    cached = load_json(AKSHARE_CACHE_JSON, {})
+    if cached.get('ts') and now - cached.get('ts', 0) < cache_ttl and isinstance(cached.get('rows'), list):
+        AKSHARE_SPOT_CACHE = cached['rows']
+        AKSHARE_SPOT_CACHE_TS = cached['ts']
         return AKSHARE_SPOT_CACHE
     try:
         import akshare as ak  # type: ignore
@@ -195,9 +202,11 @@ def load_akshare_spot_table():
         return None
     try:
         df = ak.stock_zh_a_spot_em()
-        AKSHARE_SPOT_CACHE = df
+        rows = df.to_dict('records')
+        AKSHARE_SPOT_CACHE = rows
         AKSHARE_SPOT_CACHE_TS = now
-        return df
+        save_json(AKSHARE_CACHE_JSON, {'ts': now, 'rows': rows})
+        return rows
     except Exception:
         return None
 
@@ -207,10 +216,9 @@ def get_quote_akshare(code):
     if df is None:
         return {'error': 'akshare unavailable', 'source': 'akshare'}
     try:
-        row = df[df['代码'].astype(str) == str(code)]
-        if row.empty:
+        r = next((x for x in df if str(x.get('代码')) == str(code)), None)
+        if not r:
             return {'error': 'symbol not found', 'source': 'akshare'}
-        r = row.iloc[0]
         quote = {
             'source': 'akshare',
             'price': normalize_numeric(r.get('最新价'), 3),
@@ -510,7 +518,7 @@ def build_llm_prompt(mode, indices, bias, alerts, positions, position_details, w
         '2. 只基于给定事实，不得编造公告/新闻\n'
         '3. 按“结论-原因-关键位-动作”表达\n'
         '4. 若数据质量可疑，明确提示人工复核\n'
-        '5. 控制在 350 字内\n\n'
+        '5. 控制在 120~180 字，不要表格，不要分点过多\n\n'
         f'结构化事实：\n{json.dumps(facts, ensure_ascii=False)}'
     )
 
