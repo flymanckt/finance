@@ -8,6 +8,6 @@ TARGET="user:ou_382230f22d96a35fbad447656bfc6b9c"
 
 MSG=$(python3 "$SCRIPT" "$MODE")
 
-$OPENCLAW_BIN message send --channel feishu --target "$TARGET" --message "$MSG"
+$OPENCLAW_BIN message send --channel feishu --account finance --target "$TARGET" --message "$MSG"
 
 echo "$MSG"
