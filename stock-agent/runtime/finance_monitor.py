@@ -5,6 +5,7 @@ import socket
 import time
 import hashlib
 import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -17,6 +18,8 @@ ALERT_STATE_JSON = ROOT / 'runtime' / 'alert_state.json'
 RUNTIME_CONFIG_JSON = ROOT / 'runtime' / 'runtime_config.json'
 
 socket.setdefaulttimeout(15)
+AKSHARE_SPOT_CACHE = None
+AKSHARE_SPOT_CACHE_TS = None
 
 
 def load_json(path, default):
@@ -46,6 +49,53 @@ def http_get(url, retry=3):
     return {'error': 'max retry'}
 
 
+def call_minimax_summary(prompt, config):
+    if not config.get('enableLlmSummary'):
+        return None
+    provider_cfg = load_json(Path('/home/kent/.openclaw/agents/finance/agent/models.json'), {}).get('providers', {}).get('minimax', {})
+    api_key = provider_cfg.get('apiKey') or os.environ.get('MINIMAX_API_KEY')
+    base_url = provider_cfg.get('baseUrl', 'https://api.minimaxi.com/anthropic')
+    model = config.get('preferredSummaryModel', 'minimax/MiniMax-M2.7').split('/')[-1]
+    if not api_key:
+        return None
+    payload = {
+        'model': model,
+        'max_tokens': 800,
+        'messages': [
+            {
+                'role': 'user',
+                'content': prompt
+            }
+        ]
+    }
+    body = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        f"{base_url}/v1/messages",
+        data=body,
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}',
+            'x-api-key': api_key,
+            'anthropic-version': '2023-06-01'
+        },
+        method='POST'
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            parts = data.get('content') or []
+            text = ''.join([p.get('text', '') for p in parts if isinstance(p, dict)])
+            return text.strip() or None
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode('utf-8')
+        except Exception:
+            detail = str(e)
+        return f"[LLM总结失败] {detail[:300]}"
+    except Exception as e:
+        return f"[LLM总结失败] {str(e)[:300]}"
+
+
 def secid(code):
     return f"1.{code}" if code.startswith(('5', '6')) else f"0.{code}"
 
@@ -57,7 +107,6 @@ def normalize_eastmoney_price(value):
         v = float(value)
     except Exception:
         return None
-    # 东财 push2 常见价格字段为放大 100 倍整数；少数情况下已是正常值
     if abs(v) >= 10000:
         v = v / 1000
     elif abs(v) >= 1000:
@@ -72,7 +121,6 @@ def normalize_eastmoney_pct(value):
         v = float(value)
     except Exception:
         return None
-    # 涨跌幅字段通常已是百分比值，极端异常时做兜底
     if abs(v) > 1000:
         v = v / 100
     return round(v, 2)
@@ -94,9 +142,7 @@ def quote_quality(quote):
     high = quote.get('high')
     low = quote.get('low')
     pct = quote.get('changePct')
-    if price is None:
-        return 'bad'
-    if price <= 0:
+    if price is None or price <= 0:
         return 'bad'
     if high is not None and low is not None and high < low:
         return 'bad'
@@ -114,7 +160,6 @@ def get_quote_eastmoney(code):
     data = http_get(url, retry=5)
     if data.get('error') or not data.get('data'):
         return {'error': data.get('error', 'no data'), 'source': 'eastmoney'}
-
     d = data['data']
     quote = {
         'source': 'eastmoney',
@@ -131,15 +176,29 @@ def get_quote_eastmoney(code):
     return quote
 
 
-def get_quote_akshare(code):
-    # 预留第二数据源。当前环境未必已安装 akshare，因此失败要静默回退。
+def load_akshare_spot_table():
+    global AKSHARE_SPOT_CACHE, AKSHARE_SPOT_CACHE_TS
+    now = time.time()
+    if AKSHARE_SPOT_CACHE is not None and AKSHARE_SPOT_CACHE_TS and now - AKSHARE_SPOT_CACHE_TS < 60:
+        return AKSHARE_SPOT_CACHE
     try:
         import akshare as ak  # type: ignore
     except Exception:
-        return {'error': 'akshare not installed', 'source': 'akshare'}
-
+        return None
     try:
         df = ak.stock_zh_a_spot_em()
+        AKSHARE_SPOT_CACHE = df
+        AKSHARE_SPOT_CACHE_TS = now
+        return df
+    except Exception:
+        return None
+
+
+def get_quote_akshare(code):
+    df = load_akshare_spot_table()
+    if df is None:
+        return {'error': 'akshare unavailable', 'source': 'akshare'}
+    try:
         row = df[df['代码'].astype(str) == str(code)]
         if row.empty:
             return {'error': 'symbol not found', 'source': 'akshare'}
@@ -161,42 +220,42 @@ def get_quote_akshare(code):
         return {'error': str(e), 'source': 'akshare'}
 
 
-def choose_best_quote(candidates):
-    ranked = []
-    for item in candidates:
+def choose_best_quote(candidates, config):
+    priority = config.get('quoteSourcePriority', ['eastmoney', 'akshare'])
+    def score(item):
         quality = item.get('quality')
+        source = item.get('source')
+        try:
+            source_bonus = max(0, len(priority) - priority.index(source))
+        except Exception:
+            source_bonus = 0
         if quality == 'good':
-            rank = 3
-        elif quality == 'suspicious':
-            rank = 2
-        elif item.get('error'):
-            rank = 0
-        else:
-            rank = 1
-        ranked.append((rank, item))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    best = ranked[0][1] if ranked else {'error': 'no candidate'}
+            return 30 + source_bonus
+        if quality == 'suspicious':
+            return 20 + source_bonus
+        if item.get('error'):
+            return 0
+        return 10 + source_bonus
+
+    ranked = sorted(candidates, key=score, reverse=True)
+    best = ranked[0] if ranked else {'error': 'no candidate'}
     if best.get('error'):
         return best
-
-    diagnostics = []
-    for candidate in candidates:
-        diagnostics.append({
-            'source': candidate.get('source'),
-            'quality': candidate.get('quality'),
-            'price': candidate.get('price'),
-            'changePct': candidate.get('changePct'),
-            'error': candidate.get('error')
-        })
-    best['diagnostics'] = diagnostics
+    best['diagnostics'] = [{
+        'source': c.get('source'),
+        'quality': c.get('quality'),
+        'price': c.get('price'),
+        'changePct': c.get('changePct'),
+        'error': c.get('error')
+    } for c in candidates]
     return best
 
 
-def get_quote(code):
+def get_quote(code, config):
     candidates = [get_quote_eastmoney(code)]
-    if os.environ.get('FINANCE_ENABLE_AKSHARE', '0') == '1':
+    if config.get('enableAkshare') or os.environ.get('FINANCE_ENABLE_AKSHARE', '0') == '1':
         candidates.append(get_quote_akshare(code))
-    return choose_best_quote(candidates)
+    return choose_best_quote(candidates, config)
 
 
 def get_indices():
@@ -299,27 +358,14 @@ def build_position_alerts(positions, last_snapshot, config):
     current_snapshot = {}
     detailed = []
     for p in positions:
-        quote = get_quote(p['symbol'])
+        quote = get_quote(p['symbol'], config)
         time.sleep(0.2)
         current_snapshot[p['symbol']] = quote
-        detail = {
-            'symbol': p['symbol'],
-            'name': p['name'],
-            'quote': quote,
-            'cost': p.get('cost'),
-            'hardStop': p.get('hardStop')
-        }
+        detail = {'symbol': p['symbol'], 'name': p['name'], 'quote': quote, 'cost': p.get('cost'), 'hardStop': p.get('hardStop')}
         detailed.append(detail)
 
         if quote.get('error') or quote.get('quality') == 'bad':
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '中',
-                'action': '观察',
-                'summary': f"{p['name']} 行情质量不足，暂不做强判断。来源：{quote.get('source', 'unknown')}。"
-            })
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '中', 'action': '观察', 'summary': f"{p['name']} 行情质量不足，暂不做强判断。来源：{quote.get('source', 'unknown')}。"})
             continue
 
         price = quote.get('price')
@@ -328,14 +374,7 @@ def build_position_alerts(positions, last_snapshot, config):
         last_price = (last_snapshot.get(p['symbol']) or {}).get('price')
 
         if quote.get('quality') == 'suspicious':
-            alerts.append({
-                'kind': 'position',
-                'symbol': p['symbol'],
-                'name': p['name'],
-                'level': '中',
-                'action': '人工复核',
-                'summary': f"{p['name']} 行情存在异常值风险，现价 {price}，涨跌 {pct}% ，建议人工复核后再决策。"
-            })
+            alerts.append({'kind': 'position', 'symbol': p['symbol'], 'name': p['name'], 'level': '中', 'action': '人工复核', 'summary': f"{p['name']} 行情存在异常值风险，现价 {price}，涨跌 {pct}% ，建议人工复核后再决策。"})
             continue
 
         if price is not None and stop is not None and price <= stop:
@@ -354,7 +393,7 @@ def build_watchlist_alerts(items, config):
     alerts = []
     detailed = []
     for item in items:
-        quote = get_quote(item['symbol'])
+        quote = get_quote(item['symbol'], config)
         time.sleep(0.2)
         if quote.get('error'):
             continue
@@ -443,7 +482,30 @@ def build_data_quality_summary(position_details, watchlist_details):
     return f"数据质量：良好 {good}，可疑 {suspicious}，不可用 {bad}"
 
 
-def format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details):
+def build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured_message):
+    facts = {
+        'mode': mode,
+        'bias': bias,
+        'indices': indices,
+        'alerts': alerts,
+        'positions': positions,
+        'position_details': position_details,
+        'watchlist_details': watchlist_details,
+        'structured_message': structured_message,
+    }
+    return (
+        '你是A股交易情报官。请基于给定结构化事实，输出一版更准确、更简洁、交易含义更强的中文总结。\n'
+        '要求：\n'
+        '1. 必须先给结论\n'
+        '2. 只基于给定事实，不得编造公告/新闻\n'
+        '3. 按“结论-原因-关键位-动作”表达\n'
+        '4. 若数据质量可疑，明确提示人工复核\n'
+        '5. 控制在 350 字内\n\n'
+        f'结构化事实：\n{json.dumps(facts, ensure_ascii=False)}'
+    )
+
+
+def format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details, config):
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
     lines = [f"【Finance {mode}】{now}", f"市场环境：{bias}"]
     if indices:
@@ -463,7 +525,9 @@ def format_message(mode, indices, bias, alerts, positions, position_details, wat
         lines.append('观察池复盘：')
         lines.extend(format_watchlist_review(watchlist_details))
         lines.append('明日原则：先看风险，再决定是否进攻。')
-        return '\n'.join(lines)
+        structured = '\n'.join(lines)
+        llm = call_minimax_summary(build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured), config)
+        return f"{structured}\n\nLLM总结：\n{llm}" if llm else structured
 
     if alerts:
         lines.append('重点变化：')
@@ -474,7 +538,9 @@ def format_message(mode, indices, bias, alerts, positions, position_details, wat
         lines.append('重点变化：暂无显著增量信号，维持原计划。')
 
     lines.append('原则：先风险，后机会；持仓优先。')
-    return '\n'.join(lines)
+    structured = '\n'.join(lines)
+    llm = call_minimax_summary(build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured), config)
+    return f"{structured}\n\nLLM总结：\n{llm}" if llm else structured
 
 
 def append_ledger(mode, alerts, bias, position_details, watchlist_details):
@@ -514,7 +580,7 @@ def main():
     position_alerts, current_snapshot, position_details = build_position_alerts(positions, last_snapshot, config)
     watchlist_alerts, watchlist_details = build_watchlist_alerts(watch_items, config)
     alerts = dedup_alerts(position_alerts + watchlist_alerts, state, config, mode)
-    msg = format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details)
+    msg = format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details, config)
     append_ledger(mode, alerts, bias, position_details, watchlist_details)
     save_json(CACHE_JSON, current_snapshot)
     save_json(ALERT_STATE_JSON, state)

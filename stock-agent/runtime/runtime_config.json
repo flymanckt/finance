@@ -8,10 +8,10 @@
   "closeReviewIncludeAllPositions": true,
   "preferredSummaryModel": "minimax/MiniMax-M2.7",
   "deepReviewModel": "openai-codex/gpt-5.2",
-  "enableAkshare": false,
-  "enableLlmSummary": false,
+  "enableAkshare": true,
+  "enableLlmSummary": true,
   "quoteSourcePriority": [
-    "eastmoney",
-    "akshare"
+    "akshare",
+    "eastmoney"
   ]
 }
