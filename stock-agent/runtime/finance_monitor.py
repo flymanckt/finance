@@ -49,9 +49,17 @@ def http_get(url, retry=3):
     return {'error': 'max retry'}
 
 
-def call_minimax_summary(prompt, config):
+def should_use_llm(mode, alerts, config):
     if not config.get('enableLlmSummary'):
-        return None
+        return False
+    llm_modes = config.get('llmEnabledModes', ['盘前', '收盘'])
+    if mode in llm_modes:
+        return True
+    high_risk = any(a.get('level') == '高' for a in alerts)
+    return high_risk and config.get('llmOnHighRiskOnly', True)
+
+
+def call_minimax_summary(prompt, config):
     provider_cfg = load_json(Path('/home/kent/.openclaw/agents/finance/agent/models.json'), {}).get('providers', {}).get('minimax', {})
     api_key = provider_cfg.get('apiKey') or os.environ.get('MINIMAX_API_KEY')
     base_url = provider_cfg.get('baseUrl', 'https://api.minimaxi.com/anthropic')
@@ -251,9 +259,11 @@ def choose_best_quote(candidates, config):
     return best
 
 
-def get_quote(code, config):
+def get_quote(code, config, mode='巡检'):
     candidates = [get_quote_eastmoney(code)]
-    if config.get('enableAkshare') or os.environ.get('FINANCE_ENABLE_AKSHARE', '0') == '1':
+    akshare_modes = config.get('akshareEnabledModes', ['盘前', '收盘'])
+    enable_ak = config.get('enableAkshare') or os.environ.get('FINANCE_ENABLE_AKSHARE', '0') == '1'
+    if enable_ak and mode in akshare_modes:
         candidates.append(get_quote_akshare(code))
     return choose_best_quote(candidates, config)
 
@@ -353,12 +363,12 @@ def score_watch_item(item, quote):
     return max(score, 0), reasons
 
 
-def build_position_alerts(positions, last_snapshot, config):
+def build_position_alerts(positions, last_snapshot, config, mode):
     alerts = []
     current_snapshot = {}
     detailed = []
     for p in positions:
-        quote = get_quote(p['symbol'], config)
+        quote = get_quote(p['symbol'], config, mode)
         time.sleep(0.2)
         current_snapshot[p['symbol']] = quote
         detail = {'symbol': p['symbol'], 'name': p['name'], 'quote': quote, 'cost': p.get('cost'), 'hardStop': p.get('hardStop')}
@@ -389,11 +399,11 @@ def build_position_alerts(positions, last_snapshot, config):
     return alerts[:config.get('positionMaxAlerts', 6)], current_snapshot, detailed
 
 
-def build_watchlist_alerts(items, config):
+def build_watchlist_alerts(items, config, mode):
     alerts = []
     detailed = []
     for item in items:
-        quote = get_quote(item['symbol'], config)
+        quote = get_quote(item['symbol'], config, mode)
         time.sleep(0.2)
         if quote.get('error'):
             continue
@@ -526,7 +536,7 @@ def format_message(mode, indices, bias, alerts, positions, position_details, wat
         lines.extend(format_watchlist_review(watchlist_details))
         lines.append('明日原则：先看风险，再决定是否进攻。')
         structured = '\n'.join(lines)
-        llm = call_minimax_summary(build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured), config)
+        llm = call_minimax_summary(build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured), config) if should_use_llm(mode, alerts, config) else None
         return f"{structured}\n\nLLM总结：\n{llm}" if llm else structured
 
     if alerts:
@@ -539,7 +549,7 @@ def format_message(mode, indices, bias, alerts, positions, position_details, wat
 
     lines.append('原则：先风险，后机会；持仓优先。')
     structured = '\n'.join(lines)
-    llm = call_minimax_summary(build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured), config)
+    llm = call_minimax_summary(build_llm_prompt(mode, indices, bias, alerts, positions, position_details, watchlist_details, structured), config) if should_use_llm(mode, alerts, config) else None
     return f"{structured}\n\nLLM总结：\n{llm}" if llm else structured
 
 
@@ -577,8 +587,8 @@ def main():
     last_snapshot = load_json(CACHE_JSON, {})
     indices = get_indices()
     bias = market_bias(indices)
-    position_alerts, current_snapshot, position_details = build_position_alerts(positions, last_snapshot, config)
-    watchlist_alerts, watchlist_details = build_watchlist_alerts(watch_items, config)
+    position_alerts, current_snapshot, position_details = build_position_alerts(positions, last_snapshot, config, mode)
+    watchlist_alerts, watchlist_details = build_watchlist_alerts(watch_items, config, mode)
     alerts = dedup_alerts(position_alerts + watchlist_alerts, state, config, mode)
     msg = format_message(mode, indices, bias, alerts, positions, position_details, watchlist_details, config)
     append_ledger(mode, alerts, bias, position_details, watchlist_details)

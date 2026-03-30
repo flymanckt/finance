@@ -13,5 +13,14 @@
   "quoteSourcePriority": [
     "akshare",
     "eastmoney"
-  ]
+  ],
+  "akshareEnabledModes": [
+    "盘前",
+    "收盘"
+  ],
+  "llmEnabledModes": [
+    "盘前",
+    "收盘"
+  ],
+  "llmOnHighRiskOnly": true
 }
