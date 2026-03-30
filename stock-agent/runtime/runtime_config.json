@@ -5,5 +5,13 @@
   "priceMoveThresholdPct": 3,
   "dropAlertPct": -5,
   "surgeAlertPct": 5,
-  "closeReviewIncludeAllPositions": true
+  "closeReviewIncludeAllPositions": true,
+  "preferredSummaryModel": "minimax/MiniMax-M2.7",
+  "deepReviewModel": "openai-codex/gpt-5.2",
+  "enableAkshare": false,
+  "enableLlmSummary": false,
+  "quoteSourcePriority": [
+    "eastmoney",
+    "akshare"
+  ]
 }
